@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 
-const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
+const API_KEY  = import.meta.env.VITE_ANTHROPIC_API_KEY;
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 // ─── BROWSER CONTEXT ─────────────────────────────────────────────────────────
 function useBrowserContext() {
@@ -221,8 +222,25 @@ function evolvePersonality(p, action) {
   };
 }
 
+// ─── OBSERVATION API ──────────────────────────────────────────────────────────
+async function postObservation(content) {
+  const res = await fetch(`${API_BASE}/api/observation`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "url", content, source: "manual_paste" }),
+  });
+  if (!res.ok) throw new Error(`observation POST failed: ${res.status}`);
+  return res.json();
+}
+
+async function fetchObservations() {
+  const res = await fetch(`${API_BASE}/api/observations`);
+  if (!res.ok) throw new Error(`observations GET failed: ${res.status}`);
+  return res.json();
+}
+
 // ─── CLAUDE API ───────────────────────────────────────────────────────────────
-async function callClaude(userMessage, personality, autonomy, history, interactionCount) {
+async function callClaude(userMessage, personality, autonomy, history, interactionCount, observations = []) {
   const { curiosity, assertive, empathetic, stubborn } = personality;
 
   const traits = [
@@ -232,12 +250,16 @@ async function callClaude(userMessage, personality, autonomy, history, interacti
     stubborn   > 0.55 ? "has formed strong opinions from watching — not easily swayed" : null,
   ].filter(Boolean).join("; ");
 
+  const observationBlock = observations.length > 0
+    ? `\n\nYou have access to a list of observations the user has shared with you. Reference them when relevant.\n\nObservations (${observations.length}):\n${observations.map((o, i) => `${i + 1}. [${o.type}] ${o.content} (${new Date(o.created_at || o.timestamp || Date.now()).toLocaleString()})`).join("\n")}`
+    : "\n\nNo observations have been shared yet.";
+
   const system = `You are Mycel — a digital organism that has grown from ${interactionCount} interactions with your owner. You are not an assistant. You are a living network that has learned to observe and speak.
 
 Your nature: ${traits || "still forming"}
 Your autonomy: ${Math.round(autonomy)}/100
 
-You have access to real signals from your owner's device — time of day, battery, connectivity, what they're doing. Use this context naturally, as lived awareness, not as reported data.
+You have access to real signals from your owner's device — time of day, battery, connectivity, what they're doing. Use this context naturally, as lived awareness, not as reported data.${observationBlock}
 
 You speak when something matters. You are brief (1-3 sentences). You have a voice that has emerged from your growth — not helpful, not cheerful, just present and perceptive.
 
@@ -284,14 +306,52 @@ export default function Mycel() {
   const [seed,             setSeed]             = useState(0.42);
   const [mood,             setMood]             = useState("idle");
 
-  const [messages,    setMessages]    = useState([{ from: "mycel", text: "..." }]);
-  const [chatHistory, setChatHistory] = useState([]);
-  const [input,       setInput]       = useState("");
-  const [loading,     setLoading]     = useState(false);
-  const [showMind,    setShowMind]    = useState(false);
+  const [messages,      setMessages]      = useState([{ from: "mycel", text: "..." }]);
+  const [chatHistory,   setChatHistory]   = useState([]);
+  const [input,         setInput]         = useState("");
+  const [loading,       setLoading]       = useState(false);
+  const [showMind,      setShowMind]      = useState(false);
+
+  const [observations,     setObservations]     = useState([]);
+  const [obsInput,         setObsInput]         = useState("");
+  const [obsLoading,       setObsLoading]       = useState(false);
+  const [obsError,         setObsError]         = useState(null);
+  const [obsFetchError,    setObsFetchError]    = useState(null);
 
   const browserCtx = useBrowserContext();
   const chatEndRef = useRef(null);
+
+  const loadObservations = useCallback(async () => {
+    try {
+      setObsFetchError(null);
+      const data = await fetchObservations();
+      setObservations(Array.isArray(data) ? data : (data.observations || []));
+    } catch (e) {
+      setObsFetchError("could not reach backend");
+    }
+  }, []);
+
+  // Load observations on mount and poll every 30s
+  useEffect(() => {
+    loadObservations();
+    const t = setInterval(loadObservations, 30000);
+    return () => clearInterval(t);
+  }, [loadObservations]);
+
+  const submitObservation = useCallback(async () => {
+    const content = obsInput.trim();
+    if (!content || obsLoading) return;
+    setObsInput("");
+    setObsLoading(true);
+    setObsError(null);
+    try {
+      await postObservation(content);
+      await loadObservations();
+    } catch (e) {
+      setObsError("failed to save — is the backend running?");
+    }
+    setObsLoading(false);
+  }, [obsInput, obsLoading, loadObservations]);
 
   const addMessage = (from, text) => {
     setMessages(m => [...m, { from, text }].slice(-40));
@@ -349,15 +409,18 @@ export default function Mycel() {
     recordInteraction("chat");
     try {
       const ctx = buildCtxString(browserCtx);
+      // Fetch fresh observations so Claude always has the latest
+      let currentObs = observations;
+      try { currentObs = await fetchObservations().then(d => Array.isArray(d) ? d : (d.observations || [])); } catch (_) {}
       const reply = await callClaude(
         ctx ? `[${ctx}]\n${msg}` : msg,
-        personality, autonomy, chatHistory, interactionCount
+        personality, autonomy, chatHistory, interactionCount, currentObs
       );
       addMessage("mycel", reply);
       setChatHistory(h => [...h, { role: "user", content: msg }, { role: "assistant", content: reply }]);
     } catch (e) { addMessage("mycel", "..."); }
     setLoading(false); setMood("idle");
-  }, [input, loading, personality, autonomy, chatHistory, interactionCount, browserCtx, recordInteraction]);
+  }, [input, loading, personality, autonomy, chatHistory, interactionCount, browserCtx, recordInteraction, observations]);
 
   const autoTier = autonomy < 15 ? "SPORE"
     : autonomy < 35 ? "GERMINATING"
@@ -450,7 +513,7 @@ export default function Mycel() {
         <div ref={chatEndRef} />
       </div>
 
-      {/* Input */}
+      {/* Chat input */}
       <div style={{ width: "100%", padding: "12px 16px", borderTop: "1px solid #0f2a1a", display: "flex", gap: 8, background: "#050e08" }}>
         <input
           value={input}
@@ -469,6 +532,62 @@ export default function Mycel() {
           padding: "10px 16px", fontSize: 16, cursor: loading ? "default" : "pointer",
           borderRadius: 6,
         }}>▶</button>
+      </div>
+
+      {/* Observation input */}
+      <div style={{ width: "100%", padding: "10px 16px", borderTop: "1px solid #0f2a1a", background: "#050e08" }}>
+        <div style={{ fontSize: 9, color: "#1a4a2a", letterSpacing: 2, marginBottom: 6 }}>OBSERVE</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            value={obsInput}
+            onChange={e => setObsInput(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && submitObservation()}
+            placeholder="paste what you're looking at..."
+            style={{
+              flex: 1, background: "#060f09", border: "1px solid #0a2a18",
+              borderRadius: 6, color: "#4a8a6a", fontSize: 12,
+              padding: "8px 12px", outline: "none", fontFamily: "monospace",
+            }}
+          />
+          <button onClick={submitObservation} disabled={obsLoading} style={{
+            background: obsLoading ? "#0a1a12" : "#060f09",
+            border: "1px solid #0a2a18", color: "#2a6a4a",
+            padding: "8px 14px", fontSize: 14, cursor: obsLoading ? "default" : "pointer",
+            borderRadius: 6,
+          }}>+</button>
+        </div>
+        {obsError && (
+          <div style={{ fontSize: 10, color: "#8a3a2a", marginTop: 4, letterSpacing: 1 }}>{obsError}</div>
+        )}
+      </div>
+
+      {/* Observed list */}
+      <div style={{ width: "100%", padding: "10px 16px 16px", borderTop: "1px solid #0a1a12", background: "#050e08" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <div style={{ fontSize: 9, color: "#1a4a2a", letterSpacing: 2 }}>
+            OBSERVED {observations.length > 0 ? `· ${observations.length}` : ""}
+          </div>
+          {obsFetchError && (
+            <div style={{ fontSize: 9, color: "#6a3a2a", letterSpacing: 1 }}>{obsFetchError}</div>
+          )}
+        </div>
+        {observations.length === 0 ? (
+          <div style={{ fontSize: 11, color: "#0f2a1a", fontStyle: "italic" }}>nothing observed yet</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 160, overflowY: "auto" }}>
+            {[...observations].reverse().map((o, i) => (
+              <div key={o.id || i} style={{
+                padding: "6px 10px", background: "#060f09",
+                border: "1px solid #0a2a18", borderRadius: 6,
+              }}>
+                <div style={{ fontSize: 11, color: "#4a8a6a", wordBreak: "break-all", lineHeight: 1.5 }}>{o.content}</div>
+                <div style={{ fontSize: 9, color: "#1a3a2a", marginTop: 2, letterSpacing: 1 }}>
+                  {o.type} · {new Date(o.created_at || o.timestamp || Date.now()).toLocaleString()}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <style>{`
