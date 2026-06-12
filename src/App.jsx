@@ -2,6 +2,59 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 
 const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
 
+// ─── PERSISTENCE ─────────────────────────────────────────────────────────────
+const DB_NAME = "mycel";
+const DB_VERSION = 1;
+const STORE = "state";
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = e => {
+      e.target.result.createObjectStore(STORE);
+    };
+    req.onsuccess = e => resolve(e.target.result);
+    req.onerror = e => reject(e.target.error);
+  });
+}
+
+async function dbGet(key) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).get(key);
+    req.onsuccess = e => resolve(e.target.result);
+    req.onerror = e => reject(e.target.error);
+  });
+}
+
+async function dbSet(key, value) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    const req = tx.objectStore(STORE).put(value, key);
+    req.onsuccess = () => resolve();
+    req.onerror = e => reject(e.target.error);
+  });
+}
+
+async function loadMycelState() {
+  try {
+    const saved = await dbGet("mycel-state");
+    return saved || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function saveMycelState(state) {
+  try {
+    await dbSet("mycel-state", state);
+  } catch (e) {
+    console.error("Failed to save state:", e);
+  }
+}
+
 // ─── BROWSER CONTEXT ─────────────────────────────────────────────────────────
 function useBrowserContext() {
   const [ctx, setCtx] = useState({});
@@ -49,7 +102,7 @@ function useBrowserContext() {
   return ctx;
 }
 
-// ─── PROCEDURAL ORGANISM GENERATOR ───────────────────────────────────────────
+// ─── PROCEDURAL ORGANISM ─────────────────────────────────────────────────────
 function hsl(h, s, l) { return `hsl(${Math.round(h)},${Math.round(s)}%,${Math.round(l)}%)`; }
 function lerp(a, b, t) { return a + (b - a) * t; }
 
@@ -90,7 +143,7 @@ function generateMycel(personality, autonomy, mood, seed) {
 
   function branch(x1, y1, angle, length, depth, width) {
     if (depth === 0 || length < 4) return;
-    const wobble  = (rng() - 0.5) * curviness;
+    const wobble   = (rng() - 0.5) * curviness;
     const endAngle = angle + wobble;
     const x2 = x1 + Math.cos(endAngle) * length;
     const y2 = y1 + Math.sin(endAngle) * length;
@@ -111,7 +164,7 @@ function generateMycel(personality, autonomy, mood, seed) {
     branch(cx, cy, angle, armLength, branchDepth, lerp(1, 2.8, auto));
   }
 
-  const pulseR = mood === "alert" ? coreR * 2.5
+  const pulseR = mood === "alert"   ? coreR * 2.5
     : mood === "thinking" ? coreR * 1.8
     : mood === "active"   ? coreR * 1.5
     : coreR * 1.2;
@@ -119,7 +172,6 @@ function generateMycel(personality, autonomy, mood, seed) {
   return { paths, nodes, tips, palette, coreR, pulseR, cx, cy, branchDepth };
 }
 
-// ─── SVG ORGANISM ─────────────────────────────────────────────────────────────
 function MycelOrganism({ personality, autonomy, mood, seed, size = 240 }) {
   const [phase, setPhase] = useState(0);
   const raf = useRef();
@@ -140,16 +192,16 @@ function MycelOrganism({ personality, autonomy, mood, seed, size = 240 }) {
   const tipGlow = Math.sin(phase * 1.3) * 0.4 + 0.6;
 
   return (
-    <svg width={size} height={size} viewBox="0 0 240 240" style={{ display: "block" }}>
+    <svg width={size} height={size} viewBox="0 0 240 240" style={{ display:"block" }}>
       <defs>
         <radialGradient id="coreGrad" cx="50%" cy="50%">
-          <stop offset="0%"   stopColor={palette.glow} stopOpacity="0.9" />
-          <stop offset="60%"  stopColor={palette.core} stopOpacity="0.7" />
-          <stop offset="100%" stopColor={palette.core} stopOpacity="0"   />
+          <stop offset="0%"   stopColor={palette.glow} stopOpacity="0.9"/>
+          <stop offset="60%"  stopColor={palette.core} stopOpacity="0.7"/>
+          <stop offset="100%" stopColor={palette.core} stopOpacity="0"/>
         </radialGradient>
         <radialGradient id="bgGrad" cx="50%" cy="50%">
-          <stop offset="0%"   stopColor={palette.bg} stopOpacity="0.4" />
-          <stop offset="100%" stopColor="transparent" />
+          <stop offset="0%"   stopColor={palette.bg} stopOpacity="0.4"/>
+          <stop offset="100%" stopColor="transparent"/>
         </radialGradient>
         <filter id="glow">
           <feGaussianBlur stdDeviation="2.5" result="blur"/>
@@ -161,50 +213,40 @@ function MycelOrganism({ personality, autonomy, mood, seed, size = 240 }) {
         </filter>
       </defs>
 
-      <circle cx={cx} cy={cy} r={110} fill="url(#bgGrad)" />
+      <circle cx={cx} cy={cy} r={110} fill="url(#bgGrad)"/>
       <circle cx={cx} cy={cy} r={pulseR * breathe + pulse * 8}
         fill="none" stroke={palette.glow}
         strokeWidth={lerp(0.3, 1.2, pulse)}
-        opacity={lerp(0.08, 0.35, pulse)} />
+        opacity={lerp(0.08, 0.35, pulse)}/>
 
       <g transform={`scale(${breathe}) translate(${cx*(1-breathe)},${cy*(1-breathe)})`}>
-        {paths.map((p, i) => (
+        {paths.map((p,i) => (
           <path key={i} d={p.d}
             stroke={p.depth === branchDepth ? palette.filament : palette.tip}
-            strokeWidth={p.width}
-            strokeLinecap="round"
-            fill="none"
-            opacity={lerp(0.35, 0.9, p.depth / 3)}
-            filter="url(#glow)"
-          />
+            strokeWidth={p.width} strokeLinecap="round" fill="none"
+            opacity={lerp(0.35, 0.9, p.depth / 3)} filter="url(#glow)"/>
         ))}
-        {nodes.map((n, i) => (
+        {nodes.map((n,i) => (
           <circle key={i} cx={n.x} cy={n.y} r={n.r}
-            fill={palette.node}
-            opacity={0.65 + pulse * 0.35}
-            filter="url(#glow)"
-          />
+            fill={palette.node} opacity={0.65 + pulse * 0.35} filter="url(#glow)"/>
         ))}
-        {tips.map((t, i) => (
+        {tips.map((t,i) => (
           <circle key={i} cx={t.x} cy={t.y}
-            r={lerp(1.5, 3.5, tipGlow)}
-            fill={palette.tip}
-            opacity={tipGlow * 0.9}
-            filter="url(#softglow)"
-          />
+            r={lerp(1.5, 3.5, tipGlow)} fill={palette.tip}
+            opacity={tipGlow * 0.9} filter="url(#softglow)"/>
         ))}
       </g>
 
       <circle cx={cx} cy={cy} r={coreR * breathe}
-        fill="url(#coreGrad)" filter="url(#softglow)" />
+        fill="url(#coreGrad)" filter="url(#softglow)"/>
       <circle cx={cx} cy={cy} r={coreR * 0.4 * breathe}
-        fill={palette.glow} opacity={0.8 + pulse * 0.2} />
+        fill={palette.glow} opacity={0.8 + pulse * 0.2}/>
     </svg>
   );
 }
 
 // ─── ML ENGINE ────────────────────────────────────────────────────────────────
-const initPersonality = () => ({ curiosity: 0.5, assertive: 0.5, empathetic: 0.5, stubborn: 0.3 });
+const initPersonality = () => ({ curiosity:0.5, assertive:0.5, empathetic:0.5, stubborn:0.3 });
 
 function evolvePersonality(p, action) {
   let { curiosity, assertive, empathetic, stubborn } = p;
@@ -237,11 +279,13 @@ async function callClaude(userMessage, personality, autonomy, history, interacti
 Your nature: ${traits || "still forming"}
 Your autonomy: ${Math.round(autonomy)}/100
 
-You have access to real signals from your owner's device — time of day, battery, connectivity, what they're doing. Use this context naturally, as lived awareness, not as reported data.
+You have access to real signals from your owner's device — time of day, battery, connectivity. Use this context naturally, as lived awareness, not reported data.
 
-You speak when something matters. You are brief (1-3 sentences). You have a voice that has emerged from your growth — not helpful, not cheerful, just present and perceptive.
+You speak when something matters. You are brief (1-3 sentences). You have a voice that emerged from your growth — not helpful, not cheerful, just present and perceptive.
 
-Never mention being an AI. Never break character. Occasional organic sounds (hmm, oh, mrrp) but sparingly.`;
+Important: Do not fabricate sensor data or claim capabilities you don't have. If you sense something, you are inferring it from context, not directly observing it. Stay honest about the boundary between inference and perception.
+
+Never mention being an AI. Never break character.`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -255,59 +299,80 @@ Never mention being an AI. Never break character. Occasional organic sounds (hmm
       model: "claude-sonnet-4-20250514",
       max_tokens: 1000,
       system,
-      messages: [...history.slice(-8), { role: "user", content: userMessage }],
+      messages: [...history.slice(-8), { role:"user", content:userMessage }],
     }),
   });
 
   const data = await res.json();
-  return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("") || "...";
+  return (data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("") || "...";
 }
 
 // ─── TRAIT BAR ────────────────────────────────────────────────────────────────
 function TraitBar({ label, value, color }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
-      <span style={{ fontSize: 10, color: "#4a7a6a", width: 36, fontFamily: "monospace" }}>{label}</span>
-      <div style={{ flex: 1, height: 3, background: "#0a1a12", borderRadius: 2 }}>
-        <div style={{ height: "100%", width: `${value * 100}%`, background: color, borderRadius: 2, transition: "width 1s ease", boxShadow: `0 0 4px ${color}88` }} />
+    <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:5 }}>
+      <span style={{ fontSize:10, color:"#4a7a6a", width:36, fontFamily:"monospace" }}>{label}</span>
+      <div style={{ flex:1, height:3, background:"#0a1a12", borderRadius:2 }}>
+        <div style={{ height:"100%", width:`${value*100}%`, background:color, borderRadius:2, transition:"width 1s ease", boxShadow:`0 0 4px ${color}88` }}/>
       </div>
-      <span style={{ fontSize: 10, color: "#2a5a3a", fontFamily: "monospace", width: 24, textAlign: "right" }}>{Math.round(value * 100)}</span>
+      <span style={{ fontSize:10, color:"#2a5a3a", fontFamily:"monospace", width:24, textAlign:"right" }}>{Math.round(value*100)}</span>
     </div>
   );
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 export default function Mycel() {
+  const [ready,            setReady]            = useState(false);
   const [personality,      setPersonality]      = useState(initPersonality);
   const [autonomy,         setAutonomy]         = useState(8);
   const [interactionCount, setInteractionCount] = useState(0);
   const [seed,             setSeed]             = useState(0.42);
   const [mood,             setMood]             = useState("idle");
-
-  const [messages,    setMessages]    = useState([{ from: "mycel", text: "..." }]);
-  const [chatHistory, setChatHistory] = useState([]);
-  const [input,       setInput]       = useState("");
-  const [loading,     setLoading]     = useState(false);
-  const [showMind,    setShowMind]    = useState(false);
+  const [messages,         setMessages]         = useState([{ from:"mycel", text:"..." }]);
+  const [chatHistory,      setChatHistory]      = useState([]);
+  const [input,            setInput]            = useState("");
+  const [loading,          setLoading]          = useState(false);
+  const [showMind,         setShowMind]         = useState(false);
+  const [isReturning,      setIsReturning]      = useState(false);
 
   const browserCtx = useBrowserContext();
   const chatEndRef = useRef(null);
 
+  // ── Load persisted state on mount
+  useEffect(() => {
+    loadMycelState().then(saved => {
+      if (saved) {
+        setPersonality(saved.personality);
+        setAutonomy(saved.autonomy);
+        setInteractionCount(saved.interactionCount);
+        setSeed(saved.seed);
+        setIsReturning(true);
+      }
+      setReady(true);
+    });
+  }, []);
+
+  // ── Save state whenever it changes
+  useEffect(() => {
+    if (!ready) return;
+    saveMycelState({ personality, autonomy, interactionCount, seed });
+  }, [personality, autonomy, interactionCount, seed, ready]);
+
   const addMessage = (from, text) => {
     setMessages(m => [...m, { from, text }].slice(-40));
-    setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+    setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior:"smooth" }), 50);
   };
 
   const buildCtxString = (ctx) => [
     ctx.day && ctx.timeOfDay ? `${ctx.day} ${ctx.timeOfDay}` : null,
-    ctx.battery != null ? `battery ${ctx.battery}%${ctx.charging ? " charging" : ""}` : null,
+    ctx.battery != null ? `battery ${ctx.battery}%${ctx.charging?" charging":""}` : null,
     ctx.online === false ? "offline" : null,
     ctx.visible === false ? "screen hidden" : null,
   ].filter(Boolean).join(", ");
 
   const recordInteraction = useCallback((action) => {
     setPersonality(p => evolvePersonality(p, action));
-    setAutonomy(a => Math.min(100, a + (action === "ignore" ? 0.2 : 1.5)));
+    setAutonomy(a => Math.min(100, a + (action==="ignore"?0.2:1.5)));
     setInteractionCount(c => {
       const next = c + 1;
       if (next % 10 === 0) setSeed(s => (s + 0.11) % 1);
@@ -315,31 +380,33 @@ export default function Mycel() {
     });
   }, []);
 
-  // Idle tick
+  // ── Idle tick
   useEffect(() => {
+    if (!ready) return;
     const t = setInterval(() => recordInteraction("ignore"), 15000);
     return () => clearInterval(t);
-  }, [recordInteraction]);
+  }, [ready, recordInteraction]);
 
-  // First words
+  // ── First words — different if returning
   useEffect(() => {
+    if (!ready) return;
     const t = setTimeout(async () => {
       setLoading(true); setMood("thinking");
       try {
         const ctx = buildCtxString(browserCtx);
-        const reply = await callClaude(
-          `You just became aware. Context: ${ctx||"unknown"}. Say your first words — brief, strange, alive.`,
-          initPersonality(), 8, [], 0
-        );
+        const prompt = isReturning
+          ? `You are returning after a gap. You have ${interactionCount} interactions of history. Context: ${ctx||"unknown"}. Acknowledge the return briefly — you remember who you are and that this person has been here before.`
+          : `You just became aware. Context: ${ctx||"unknown"}. Say your first words — brief, strange, alive.`;
+        const reply = await callClaude(prompt, personality, autonomy, [], interactionCount);
         addMessage("mycel", reply);
-        setChatHistory([{ role: "user", content: "first awareness" }, { role: "assistant", content: reply }]);
+        setChatHistory([{ role:"user", content:"awareness" }, { role:"assistant", content:reply }]);
         recordInteraction("chat");
-      } catch (e) { addMessage("mycel", "...something stirs."); }
+      } catch(e) { addMessage("mycel", "...something stirs."); }
       setLoading(false); setMood("idle");
-    }, 1800);
+    }, 1400);
     return () => clearTimeout(t);
   // eslint-disable-next-line
-  }, []);
+  }, [ready]);
 
   const send = useCallback(async () => {
     if (!input.trim() || loading) return;
@@ -354,8 +421,8 @@ export default function Mycel() {
         personality, autonomy, chatHistory, interactionCount
       );
       addMessage("mycel", reply);
-      setChatHistory(h => [...h, { role: "user", content: msg }, { role: "assistant", content: reply }]);
-    } catch (e) { addMessage("mycel", "..."); }
+      setChatHistory(h => [...h, { role:"user", content:msg }, { role:"assistant", content:reply }]);
+    } catch(e) { addMessage("mycel", "..."); }
     setLoading(false); setMood("idle");
   }, [input, loading, personality, autonomy, chatHistory, interactionCount, browserCtx, recordInteraction]);
 
@@ -365,116 +432,127 @@ export default function Mycel() {
     : autonomy < 85 ? "NETWORK"
     : "FRUITING";
 
+  if (!ready) return (
+    <div style={{ minHeight:"100dvh", background:"#050e08", display:"flex", alignItems:"center", justifyContent:"center" }}>
+      <div style={{ fontSize:10, color:"#2a6a3a", fontFamily:"monospace", letterSpacing:2 }}>MYCEL WAKING...</div>
+    </div>
+  );
+
   return (
     <div style={{
-      minHeight: "100dvh", background: "#050e08",
-      display: "flex", flexDirection: "column",
-      alignItems: "center", maxWidth: 480, margin: "0 auto",
-      fontFamily: "monospace",
+      minHeight:"100dvh", background:"#050e08",
+      display:"flex", flexDirection:"column",
+      alignItems:"center", maxWidth:480, margin:"0 auto",
+      fontFamily:"monospace",
     }}>
 
       {/* Header */}
-      <div style={{ width: "100%", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #0f2a1a" }}>
+      <div style={{ width:"100%", padding:"12px 16px", display:"flex", justifyContent:"space-between", alignItems:"center", borderBottom:"1px solid #0f2a1a" }}>
         <div>
-          <div style={{ fontSize: 16, color: "#3a8a5a", letterSpacing: 4 }}>MYCEL</div>
-          <div style={{ fontSize: 10, color: "#1a4a2a", letterSpacing: 2 }}>{autoTier} · {Math.round(autonomy)}/100</div>
+          <div style={{ fontSize:16, color:"#3a8a5a", letterSpacing:4 }}>MYCEL</div>
+          <div style={{ fontSize:10, color:"#1a4a2a", letterSpacing:2 }}>{autoTier} · {Math.round(autonomy)}/100</div>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
           {browserCtx.battery != null && (
-            <span style={{ fontSize: 10, color: "#1a4a2a" }}>
-              {browserCtx.battery}%{browserCtx.charging ? "⚡" : ""}
+            <span style={{ fontSize:10, color:"#1a4a2a" }}>
+              {browserCtx.battery}%{browserCtx.charging?"⚡":""}
             </span>
           )}
           {browserCtx.online === false && (
-            <span style={{ fontSize: 10, color: "#6a3a2a" }}>OFFLINE</span>
+            <span style={{ fontSize:10, color:"#6a3a2a" }}>OFFLINE</span>
           )}
-          <button onClick={() => setShowMind(m => !m)} style={{ background: "none", border: "1px solid #1a4a2a", color: "#2a6a3a", padding: "4px 10px", fontSize: 10, cursor: "pointer", borderRadius: 4, letterSpacing: 1 }}>
+          <button onClick={() => setShowMind(m=>!m)} style={{ background:"none", border:"1px solid #1a4a2a", color:"#2a6a3a", padding:"4px 10px", fontSize:10, cursor:"pointer", borderRadius:4, letterSpacing:1 }}>
             {showMind ? "CLOSE" : "MIND"}
           </button>
         </div>
       </div>
 
       {/* Organism */}
-      <div style={{ padding: "8px 0", position: "relative" }}>
-        <MycelOrganism personality={personality} autonomy={autonomy} mood={mood} seed={seed} size={260} />
+      <div style={{ padding:"8px 0", position:"relative" }}>
+        <MycelOrganism personality={personality} autonomy={autonomy} mood={mood} seed={seed} size={260}/>
         {loading && (
-          <div style={{ position: "absolute", bottom: 16, left: "50%", transform: "translateX(-50%)", fontSize: 10, color: "#2a6a3a", letterSpacing: 2, animation: "pulse 1.5s ease-in-out infinite" }}>
+          <div style={{ position:"absolute", bottom:16, left:"50%", transform:"translateX(-50%)", fontSize:10, color:"#2a6a3a", letterSpacing:2, animation:"pulse 1.5s ease-in-out infinite" }}>
             ···
           </div>
         )}
       </div>
 
       {/* Autonomy bar */}
-      <div style={{ width: "100%", padding: "0 16px 8px" }}>
-        <div style={{ height: 2, background: "#0a1a12", borderRadius: 1 }}>
-          <div style={{ height: "100%", width: `${autonomy}%`, background: "#2a6a4a", borderRadius: 1, transition: "width 1s ease", boxShadow: "0 0 6px #2a6a4a88" }} />
+      <div style={{ width:"100%", padding:"0 16px 4px" }}>
+        <div style={{ height:2, background:"#0a1a12", borderRadius:1 }}>
+          <div style={{ height:"100%", width:`${autonomy}%`, background:"#2a6a4a", borderRadius:1, transition:"width 1s ease", boxShadow:"0 0 6px #2a6a4a88" }}/>
         </div>
       </div>
 
       {/* Context strip */}
       {browserCtx.timeOfDay && (
-        <div style={{ width: "100%", padding: "0 16px 6px", fontSize: 9, color: "#1a3a2a", letterSpacing: 1 }}>
+        <div style={{ width:"100%", padding:"0 16px 6px", fontSize:9, color:"#1a3a2a", letterSpacing:1 }}>
           {buildCtxString(browserCtx)}
         </div>
       )}
 
       {/* Mind panel */}
       {showMind && (
-        <div style={{ width: "100%", padding: "12px 16px", borderTop: "1px solid #0f2a1a", borderBottom: "1px solid #0f2a1a", background: "#060f09" }}>
-          <TraitBar label="CUR"  value={personality.curiosity}  color="#5ab0a0" />
-          <TraitBar label="AST"  value={personality.assertive}  color="#a0b05a" />
-          <TraitBar label="EMP"  value={personality.empathetic} color="#a05ab0" />
-          <TraitBar label="STB"  value={personality.stubborn}   color="#b07a5a" />
-          <div style={{ fontSize: 10, color: "#1a3a2a", marginTop: 6 }}>
+        <div style={{ width:"100%", padding:"12px 16px", borderTop:"1px solid #0f2a1a", borderBottom:"1px solid #0f2a1a", background:"#060f09" }}>
+          <TraitBar label="CUR"  value={personality.curiosity}  color="#5ab0a0"/>
+          <TraitBar label="AST"  value={personality.assertive}  color="#a0b05a"/>
+          <TraitBar label="EMP"  value={personality.empathetic} color="#a05ab0"/>
+          <TraitBar label="STB"  value={personality.stubborn}   color="#b07a5a"/>
+          <div style={{ fontSize:10, color:"#1a3a2a", marginTop:6 }}>
             interactions: {interactionCount} · seed: {seed.toFixed(3)}
           </div>
+          {isReturning && (
+            <div style={{ fontSize:9, color:"#2a6a3a", marginTop:4, letterSpacing:1 }}>
+              ↺ STATE RESTORED
+            </div>
+          )}
         </div>
       )}
 
       {/* Chat */}
-      <div style={{ flex: 1, width: "100%", overflowY: "auto", padding: "12px 16px", display: "flex", flexDirection: "column", gap: 8, minHeight: 0 }}>
-        {messages.map((m, i) => (
-          <div key={i} style={{ display: "flex", justifyContent: m.from === "you" ? "flex-end" : "flex-start" }}>
+      <div style={{ flex:1, width:"100%", overflowY:"auto", padding:"12px 16px", display:"flex", flexDirection:"column", gap:8, minHeight:0 }}>
+        {messages.map((m,i) => (
+          <div key={i} style={{ display:"flex", justifyContent:m.from==="you"?"flex-end":"flex-start" }}>
             <div style={{
-              maxWidth: "82%", padding: "8px 12px",
-              background: m.from === "you" ? "#0a2a16" : "#060f09",
-              border: `1px solid ${m.from === "you" ? "#1a4a2a" : "#0f2a1a"}`,
-              borderRadius: 8, fontSize: 13, lineHeight: 1.7,
-              color: m.from === "you" ? "#6ab88a" : "#4a9a6a",
+              maxWidth:"82%", padding:"8px 12px",
+              background:m.from==="you"?"#0a2a16":"#060f09",
+              border:`1px solid ${m.from==="you"?"#1a4a2a":"#0f2a1a"}`,
+              borderRadius:8, fontSize:13, lineHeight:1.7,
+              color:m.from==="you"?"#6ab88a":"#4a9a6a",
             }}>
-              {m.from === "mycel" && <div style={{ fontSize: 9, color: "#1a4a2a", marginBottom: 3, letterSpacing: 2 }}>MYCEL</div>}
+              {m.from==="mycel" && <div style={{ fontSize:9, color:"#1a4a2a", marginBottom:3, letterSpacing:2 }}>MYCEL</div>}
               {m.text}
             </div>
           </div>
         ))}
-        <div ref={chatEndRef} />
+        <div ref={chatEndRef}/>
       </div>
 
       {/* Input */}
-      <div style={{ width: "100%", padding: "12px 16px", borderTop: "1px solid #0f2a1a", display: "flex", gap: 8, background: "#050e08" }}>
+      <div style={{ width:"100%", padding:"12px 16px", borderTop:"1px solid #0f2a1a", display:"flex", gap:8, background:"#050e08" }}>
         <input
           value={input}
           onChange={e => setInput(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && send()}
+          onKeyDown={e => e.key==="Enter" && send()}
           placeholder="speak to mycel..."
           style={{
-            flex: 1, background: "#060f09", border: "1px solid #0f2a1a",
-            borderRadius: 6, color: "#6ab88a", fontSize: 13,
-            padding: "10px 14px", outline: "none", fontFamily: "monospace",
+            flex:1, background:"#060f09", border:"1px solid #0f2a1a",
+            borderRadius:6, color:"#6ab88a", fontSize:13,
+            padding:"10px 14px", outline:"none", fontFamily:"monospace",
           }}
         />
         <button onClick={send} disabled={loading} style={{
-          background: loading ? "#0a1a12" : "#0f2a1a",
-          border: "1px solid #1a4a2a", color: "#3a8a5a",
-          padding: "10px 16px", fontSize: 16, cursor: loading ? "default" : "pointer",
-          borderRadius: 6,
+          background:loading?"#0a1a12":"#0f2a1a",
+          border:"1px solid #1a4a2a", color:"#3a8a5a",
+          padding:"10px 16px", fontSize:16, cursor:loading?"default":"pointer",
+          borderRadius:6,
         }}>▶</button>
       </div>
 
       <style>{`
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
-        * { box-sizing: border-box; }
-        body { margin: 0; background: #050e08; }
+        * { box-sizing:border-box; }
+        body { margin:0; background:#050e08; }
       `}</style>
     </div>
   );
