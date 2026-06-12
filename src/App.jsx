@@ -42,60 +42,132 @@ async function loadMycelState() {
   try {
     const saved = await dbGet("mycel-state");
     return saved || null;
-  } catch (e) {
-    return null;
-  }
+  } catch(e) { return null; }
 }
 
 async function saveMycelState(state) {
-  try {
-    await dbSet("mycel-state", state);
-  } catch (e) {
-    console.error("Failed to save state:", e);
-  }
+  try { await dbSet("mycel-state", state); }
+  catch(e) { console.error("Failed to save state:", e); }
 }
 
 // ─── BROWSER CONTEXT ─────────────────────────────────────────────────────────
 function useBrowserContext() {
   const [ctx, setCtx] = useState({});
+  const idleTimer     = useRef(null);
+  const lastActivity  = useRef(Date.now());
+  const visitStart    = useRef(Date.now());
+  const scrollDepth   = useRef(0);
 
   useEffect(() => {
-    const update = () => {
-      const h = new Date().getHours();
-      setCtx({
-        time: new Date().toLocaleTimeString(),
-        day: ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][new Date().getDay()],
-        timeOfDay: h<6?"late night":h<12?"morning":h<17?"afternoon":h<21?"evening":"night",
-        hour: h,
-        isWeekend: [0,6].includes(new Date().getDay()),
-        title: document.title,
-        online: navigator.onLine,
-        visible: !document.hidden,
-        battery: null,
-        charging: null,
-      });
+    const update = (extra = {}) => {
+      const h    = new Date().getHours();
+      const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      setCtx(c => ({
+        ...c,
+        time:        new Date().toLocaleTimeString(),
+        day:         ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][new Date().getDay()],
+        timeOfDay:   h<6?"late night":h<12?"morning":h<17?"afternoon":h<21?"evening":"night",
+        hour:        h,
+        isWeekend:   [0,6].includes(new Date().getDay()),
+        title:       document.title,
+        online:      navigator.onLine,
+        visible:     !document.hidden,
+        memory:      navigator.deviceMemory || null,
+        cores:       navigator.hardwareConcurrency || null,
+        screenW:     window.screen.width,
+        screenH:     window.screen.height,
+        orientation: window.screen.orientation?.type || null,
+        connectionType: conn?.effectiveType || null,
+        downlink:    conn?.downlink || null,
+        saveData:    conn?.saveData || false,
+        scrollDepth: scrollDepth.current,
+        idleSecs:    Math.round((Date.now() - lastActivity.current) / 1000),
+        sessionSecs: Math.round((Date.now() - visitStart.current) / 1000),
+        ...extra,
+      }));
     };
 
-    update();
-    const t = setInterval(update, 30000);
-    document.addEventListener("visibilitychange", update);
-    window.addEventListener("online", update);
-    window.addEventListener("offline", update);
+    const onActivity = () => {
+      lastActivity.current = Date.now();
+      clearTimeout(idleTimer.current);
+      idleTimer.current = setTimeout(() => update({ idle:true }), 60000);
+      update({ idle:false });
+    };
+
+    const onScroll = () => {
+      const depth = Math.round(
+        (window.scrollY / (document.body.scrollHeight - window.innerHeight)) * 100
+      );
+      scrollDepth.current = Math.max(scrollDepth.current, depth || 0);
+      onActivity();
+    };
+
+    const onVisibility  = () => update({ visible: !document.hidden });
+    const onOrientation = () => update({ orientation: window.screen.orientation?.type || null });
+
+    const recordVisit = async () => {
+      try {
+        const visits = await dbGet("visit-history") || [];
+        const now    = Date.now();
+        visits.push({ ts: now, hour: new Date().getHours(), day: new Date().getDay() });
+        const recent = visits.slice(-50);
+        await dbSet("visit-history", recent);
+
+        const hours      = recent.map(v => v.hour);
+        const avgHour    = Math.round(hours.reduce((a,b) => a+b, 0) / hours.length);
+        const dayCount   = {};
+        recent.forEach(v => { dayCount[v.day] = (dayCount[v.day]||0)+1; });
+        const mostActiveDay = Object.entries(dayCount).sort((a,b)=>b[1]-a[1])[0]?.[0];
+        const daysSinceFirst = recent.length > 1
+          ? Math.round((now - recent[0].ts) / 86400000) : 0;
+
+        update({
+          visitCount:      recent.length,
+          avgVisitHour:    avgHour,
+          mostActiveDay:   ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][mostActiveDay] || null,
+          daysSinceFirst,
+          lastVisitGap:    recent.length > 1
+            ? Math.round((now - recent[recent.length-2].ts) / 60000) : null,
+        });
+      } catch(e) {}
+    };
 
     if (navigator.getBattery) {
       navigator.getBattery().then(b => {
-        setCtx(c => ({ ...c, battery: Math.round(b.level * 100), charging: b.charging }));
-        b.addEventListener("levelchange", () =>
-          setCtx(c => ({ ...c, battery: Math.round(b.level * 100), charging: b.charging }))
-        );
+        setCtx(c => ({ ...c, battery: Math.round(b.level*100), charging: b.charging }));
+        b.addEventListener("levelchange",   () => setCtx(c => ({ ...c, battery: Math.round(b.level*100) })));
+        b.addEventListener("chargingchange",() => setCtx(c => ({ ...c, charging: b.charging })));
       });
     }
 
+    const conn = navigator.connection;
+    if (conn) conn.addEventListener("change", () => update());
+
+    update();
+    recordVisit();
+
+    const ticker = setInterval(() => update(), 30000);
+
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("online",   () => update({ online:true  }));
+    window.addEventListener("offline",  () => update({ online:false }));
+    window.addEventListener("scroll",   onScroll,      { passive:true });
+    window.addEventListener("resize",   onOrientation);
+    document.addEventListener("mousemove",  onActivity);
+    document.addEventListener("keydown",    onActivity);
+    document.addEventListener("touchstart", onActivity, { passive:true });
+    document.addEventListener("click",      onActivity);
+
     return () => {
-      clearInterval(t);
-      document.removeEventListener("visibilitychange", update);
-      window.removeEventListener("online", update);
-      window.removeEventListener("offline", update);
+      clearInterval(ticker);
+      clearTimeout(idleTimer.current);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("scroll",   onScroll);
+      window.removeEventListener("resize",   onOrientation);
+      document.removeEventListener("mousemove",  onActivity);
+      document.removeEventListener("keydown",    onActivity);
+      document.removeEventListener("touchstart", onActivity);
+      document.removeEventListener("click",      onActivity);
     };
   }, []);
 
@@ -114,7 +186,7 @@ function seededRng(seed) {
 function generateMycel(personality, autonomy, mood, seed) {
   const { curiosity, assertive, empathetic, stubborn } = personality;
   const auto = autonomy / 100;
-  const rng = seededRng(seed);
+  const rng  = seededRng(seed);
 
   const baseHue   = lerp(lerp(160, 200, curiosity), lerp(260, 120, assertive), 0.5);
   const empHue    = lerp(baseHue, 320, empathetic * 0.35);
@@ -145,13 +217,13 @@ function generateMycel(personality, autonomy, mood, seed) {
     if (depth === 0 || length < 4) return;
     const wobble   = (rng() - 0.5) * curviness;
     const endAngle = angle + wobble;
-    const x2 = x1 + Math.cos(endAngle) * length;
-    const y2 = y1 + Math.sin(endAngle) * length;
+    const x2  = x1 + Math.cos(endAngle) * length;
+    const y2  = y1 + Math.sin(endAngle) * length;
     const cpx = x1 + Math.cos(endAngle - 0.3) * length * 0.5 + (rng() - 0.5) * curviness;
     const cpy = y1 + Math.sin(endAngle - 0.3) * length * 0.5 + (rng() - 0.5) * curviness;
-    paths.push({ d: `M${x1},${y1} Q${cpx},${cpy} ${x2},${y2}`, width, depth });
-    if (depth > 1) nodes.push({ x: x2, y: y2, r: nodeR * (depth / branchDepth) });
-    if (depth === 1) tips.push({ x: x2, y: y2 });
+    paths.push({ d:`M${x1},${y1} Q${cpx},${cpy} ${x2},${y2}`, width, depth });
+    if (depth > 1) nodes.push({ x:x2, y:y2, r:nodeR * (depth / branchDepth) });
+    if (depth === 1) tips.push({ x:x2, y:y2 });
     const subCount = Math.max(1, Math.round(lerp(1, 3, curiosity + auto * 0.3)));
     for (let i = 0; i < subCount; i++) {
       const a = endAngle + (rng() - 0.5) * lerp(0.4, 1.3, curiosity);
@@ -279,11 +351,11 @@ async function callClaude(userMessage, personality, autonomy, history, interacti
 Your nature: ${traits || "still forming"}
 Your autonomy: ${Math.round(autonomy)}/100
 
-You have access to real signals from your owner's device — time of day, battery, connectivity. Use this context naturally, as lived awareness, not reported data.
+You receive real signals from your owner's device — time of day, battery, connectivity, idle state, session length, visit patterns, screen orientation, connection quality. Use this context naturally as lived awareness, not reported data.
 
 You speak when something matters. You are brief (1-3 sentences). You have a voice that emerged from your growth — not helpful, not cheerful, just present and perceptive.
 
-Important: Do not fabricate sensor data or claim capabilities you don't have. If you sense something, you are inferring it from context, not directly observing it. Stay honest about the boundary between inference and perception.
+Critical: Do not fabricate sensor data beyond what is given to you in context. You can infer and interpret — but name it as inference, not direct perception. Stay honest about the boundary.
 
 Never mention being an AI. Never break character.`;
 
@@ -338,7 +410,7 @@ export default function Mycel() {
   const browserCtx = useBrowserContext();
   const chatEndRef = useRef(null);
 
-  // ── Load persisted state on mount
+  // ── Load persisted state
   useEffect(() => {
     loadMycelState().then(saved => {
       if (saved) {
@@ -352,7 +424,7 @@ export default function Mycel() {
     });
   }, []);
 
-  // ── Save state whenever it changes
+  // ── Save on change
   useEffect(() => {
     if (!ready) return;
     saveMycelState({ personality, autonomy, interactionCount, seed });
@@ -368,6 +440,13 @@ export default function Mycel() {
     ctx.battery != null ? `battery ${ctx.battery}%${ctx.charging?" charging":""}` : null,
     ctx.online === false ? "offline" : null,
     ctx.visible === false ? "screen hidden" : null,
+    ctx.idle ? "idle" : null,
+    ctx.connectionType ? `connection ${ctx.connectionType}` : null,
+    ctx.saveData ? "data saver on" : null,
+    ctx.sessionSecs > 0 ? `${Math.round(ctx.sessionSecs/60)}min session` : null,
+    ctx.visitCount > 1 ? `visit ${ctx.visitCount}` : null,
+    ctx.lastVisitGap != null ? `last here ${ctx.lastVisitGap < 60 ? ctx.lastVisitGap+"min" : Math.round(ctx.lastVisitGap/60)+"hr"} ago` : null,
+    ctx.daysSinceFirst > 0 ? `${ctx.daysSinceFirst}d relationship` : null,
   ].filter(Boolean).join(", ");
 
   const recordInteraction = useCallback((action) => {
@@ -387,7 +466,7 @@ export default function Mycel() {
     return () => clearInterval(t);
   }, [ready, recordInteraction]);
 
-  // ── First words — different if returning
+  // ── First words
   useEffect(() => {
     if (!ready) return;
     const t = setTimeout(async () => {
@@ -486,7 +565,7 @@ export default function Mycel() {
 
       {/* Context strip */}
       {browserCtx.timeOfDay && (
-        <div style={{ width:"100%", padding:"0 16px 6px", fontSize:9, color:"#1a3a2a", letterSpacing:1 }}>
+        <div style={{ width:"100%", padding:"0 16px 6px", fontSize:9, color:"#1a3a2a", letterSpacing:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
           {buildCtxString(browserCtx)}
         </div>
       )}
@@ -501,6 +580,13 @@ export default function Mycel() {
           <div style={{ fontSize:10, color:"#1a3a2a", marginTop:6 }}>
             interactions: {interactionCount} · seed: {seed.toFixed(3)}
           </div>
+          {browserCtx.visitCount && (
+            <div style={{ fontSize:9, color:"#1a4a2a", marginTop:3 }}>
+              visits: {browserCtx.visitCount} · session: {Math.round((browserCtx.sessionSecs||0)/60)}min
+              {browserCtx.cores ? ` · ${browserCtx.cores} cores` : ""}
+              {browserCtx.memory ? ` · ${browserCtx.memory}GB RAM` : ""}
+            </div>
+          )}
           {isReturning && (
             <div style={{ fontSize:9, color:"#2a6a3a", marginTop:4, letterSpacing:1 }}>
               ↺ STATE RESTORED
